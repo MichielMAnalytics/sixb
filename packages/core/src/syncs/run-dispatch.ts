@@ -293,10 +293,21 @@ async function publishSyncRun(
   }
 }
 
+/**
+ * A request that names an existing run must ask for that same run. An automatic trigger does not
+ * have to: the orchestrator replays retained events whenever it restarts, and a deploy in between
+ * may change the Sync's mode or target. The run the trigger's id names has already answered it,
+ * and the worker fails one that has not started and no longer matches its Sync. Rejecting the
+ * trigger instead would hold every later event of its type behind it.
+ */
 function assertExistingRunMatchesRequest(
   existing: SyncRunRecord,
-  input: Pick<DispatchSyncRunInput, "sync" | "expectedLatestVersionId" | "commitMessage">
+  input: Pick<
+    DispatchSyncRunInput,
+    "sync" | "expectedLatestVersionId" | "commitMessage" | "validateExistingRun"
+  >
 ): void {
+  if (input.validateExistingRun) return
   if (!runMatchesRequest(existing, input)) {
     throw new SyncRunError(
       `[Sixb] Sync run '${existing.id}' already exists with a different request payload.`

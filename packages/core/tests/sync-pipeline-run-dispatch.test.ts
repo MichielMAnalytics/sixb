@@ -567,4 +567,88 @@ describe("automatic Sync dispatch", () => {
       created: true,
     })
   })
+
+  // Return early from `assertExistingRunMatchesRequest` for every caller, or drop that return, to
+  // watch one of these fail.
+  describe("after a deploy changes the Sync's mode", () => {
+    const projectId = "test"
+    const runId = automaticRunId("sync", "event-1")
+    const keyedOrders = defineDataset(rawOrders.id, {
+      primaryKey: "id",
+      schema: [col("id", "string")],
+    })
+    const mergingSync = defineSync(sync.id, { mode: "merge" })
+      .from(source)
+      .read(() => [])
+      .intoDataset(keyedOrders)
+
+    function dispatcherFor(storage: InMemoryStorage, definition: typeof sync | typeof mergingSync) {
+      return new SyncRunDispatcher({
+        id: projectId,
+        storage,
+        queues: new InMemoryQueues(),
+        definitions: {
+          syncs: createDefinitionCatalog(new Map([[definition.id, definition]])),
+        },
+      })
+    }
+
+    const replay = (dispatcher: SyncRunDispatcher) =>
+      dispatcher.dispatch({
+        syncId: sync.id,
+        runId,
+        source: { type: "event", eventId: "event-1" },
+        correlationId: "event-1",
+      })
+
+    test("returns the run that answered a replayed trigger", async () => {
+      const storage = new InMemoryStorage()
+      await replay(dispatcherFor(storage, sync))
+      await storage.syncRuns.start({ projectId, id: runId })
+      await storage.syncRuns.finish({
+        projectId,
+        id: runId,
+        status: "succeeded",
+        finishedAt: new Date("2026-11-08T02:49:46.770Z"),
+        rowsRead: 31,
+        output: { datasetId: rawOrders.id, versionId: "version-1" },
+      })
+
+      expect(await replay(dispatcherFor(storage, mergingSync))).toMatchObject({
+        runId,
+        created: false,
+      })
+      expect(await storage.syncRuns.getById({ projectId, id: runId })).toMatchObject({
+        mode: "snapshot",
+        status: "succeeded",
+      })
+    })
+
+    test("still rejects a manual request for that run", async () => {
+      const storage = new InMemoryStorage()
+      await replay(dispatcherFor(storage, sync))
+
+      const request = dispatchSyncRun({
+        errorReporterHost: {},
+        projectId,
+        sync: mergingSync,
+        storage,
+        queue: new InMemoryQueues().syncRuns,
+        runId,
+        createExecution: async (executionId) =>
+          createPrimitiveExecutionRecord({
+            id: executionId,
+            primitive: { kind: "sync", id: sync.id, runId },
+            origin: {
+              type: "automatic",
+              projectId,
+              source: { type: "event", eventId: "manual" },
+              correlationId: "manual",
+            },
+          }),
+      })
+
+      await expect(request).rejects.toThrow("already exists with a different request payload")
+    })
+  })
 })
